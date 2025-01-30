@@ -340,6 +340,35 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+// Print the content of a pagetable
+void vmprint_helper(pagetable_t pagetable, int level)
+{
+  if(level > 2)
+    return ;
+
+  for(int i = 0; i < 512; i ++)
+  {
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V)
+    {
+      for(int i = 0; i <= level; i ++)
+      {
+        printf(" ..");
+      }
+      printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      if(!(pte & (PTE_R | PTE_W | PTE_X)))
+        vmprint_helper((pagetable_t)PTE2PA(pte), level + 1);
+    }
+  }
+}
+
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_helper(pagetable, 0);
+}
+
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.

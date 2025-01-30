@@ -20,6 +20,7 @@ sys_exit(void)
 uint64
 sys_getpid(void)
 {
+  vmprint(myproc()->pagetable);
   return myproc()->pid;
 }
 
@@ -75,12 +76,40 @@ sys_sleep(void)
   return 0;
 }
 
+extern pte_t* walk(pagetable_t, uint64, int);
 
 #ifdef LAB_PGTBL
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 start_va, umask, va, mask = 0;
+  int num;
+  struct proc *p = myproc();
+  if(argaddr(0, &start_va) < 0)
+    return -1;
+  if(argint(1, &num) < 0)
+    return -1;
+  if(argaddr(2, &umask) < 0)
+    return -1;
+  
+  va = start_va;
+
+  if(num > 64)
+    return -1;
+  for(int i = 0; i < num; i ++)
+  {
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if(pte == 0)
+      return -1LL;
+    if(*pte & PTE_A)
+    {
+      mask |= (1 << i);
+      *pte &= ~(PTE_A);
+    }
+    va += PGSIZE;
+  }
+  copyout(p->pagetable, umask, (char *)&mask, sizeof(uint64));
+
   return 0;
 }
 #endif
