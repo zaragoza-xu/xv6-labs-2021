@@ -99,9 +99,6 @@ sys_uptime(void)
 
 uint64 sys_sigreturn(void)
 {
-  struct proc *p = myproc();
-  *p->trapframe = *p->alarm_frame;
-  p->alarm_enable = 1;
   return sigreturn();
 }
 
