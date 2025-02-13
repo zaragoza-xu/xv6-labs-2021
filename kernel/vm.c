@@ -15,6 +15,9 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+extern uint32 refcnt[];
+extern struct spinlock refcnt_lock;
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -139,7 +142,6 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
   uint64 a, last;
   pte_t *pte;
-
   if(size == 0)
     panic("mappages: size");
   
@@ -178,9 +180,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
+    uint64 pa = PTE2PA(*pte);
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+        kfree((void*)pa);
     }
     *pte = 0;
   }
@@ -303,20 +305,19 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    *pte = (*pte & ~PTE_W) | PTE_COW;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    acquire(&refcnt_lock);
+    refcnt[pa >> 12] ++;
+    release(&refcnt_lock);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
   }
@@ -340,13 +341,50 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+// cow page fault handler
+uint64 copy_on_write(pagetable_t pagetable, uint64 va)
+{
+  char *mem;
+  pte_t *pte;
+  if(va >= MAXVA)
+    return 0;
+  va = PGROUNDDOWN(va);
+
+  if((pte = walk(pagetable, va, 0)) == 0 || !(*pte & PTE_U))
+    return 0;
+  if(*pte & PTE_COW)
+  {
+    uint64 old_pa = PTE2PA(*pte);
+    uint64 flag = PTE_FLAGS(*pte);
+    mem = kalloc();
+    if(old_pa == 0 || mem == 0)
+      return 0;
+      
+    memmove(mem, (void *)old_pa, PGSIZE);
+    uvmunmap(pagetable, va, 1, 1);
+    if(mappages(pagetable, va, PGSIZE, (uint64)mem, (flag & ~PTE_COW) | PTE_W) < 0)
+    {
+      kfree(mem);
+      return 0;
+    }
+    
+    return (uint64)mem;
+  }
+  else if (*pte & PTE_W)
+  {
+    return PTE2PA(*pte);
+  }
+  else
+    return 0;
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
-  uint64 n, va0, pa0;
+  uint64 n, va0, pa0, pa;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -356,7 +394,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    
+    if((pa = copy_on_write(pagetable, va0)) == 0)
+      return -1;
+    memmove((void *)(pa + (dstva - va0)), src, n);
 
     len -= n;
     src += n;
